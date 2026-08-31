@@ -8,6 +8,66 @@
 #  ██╔╝ ██╗██║  ██║██║ ╚████║██║ ╚═╝ ██║╚██████╔╝██████╔╝
 #  ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝     ╚═╝ ╚═════╝ ╚═════╝ 
 #                                                         
+#  XRAY/REMNAWAVE NODE BUILDER v6.0.0 (major: полный аудит 2026-09, 18 находок)
+#  BREAKING ШАГ 7.9 flow offloading теперь OPT-IN: ENABLE_FLOWTABLE=1 (софт),
+#       ENABLE_HW_FLOW_OFFLOAD=1 (hw-probe). Раньше было opt-out — расходилось
+#       с контрактом стека, а established-потоки в fast-path обходили учёт
+#       ddos_protect shieldnode. На типовом remnanode (network_mode: host)
+#       forward-трафика нет — шаг был инертен. DISABLE_FLOWTABLE=1 по-прежнему
+#       принимается (legacy-алиас) и теперь УДАЛЯЕТ артефакты прошлых прогонов.
+#  FIX  fstab пишется атомарно (tmp в /etc + mv): раньше cat > в окне записи
+#       при потере питания/OOM оставлял усечённый fstab → emergency mode.
+#  FIX  apt-get install ядра: Acquire::Timeout=30/Retries=2 + timeout 900 —
+#       на РФ-нодах DPI-сталл deb.xanmod.org больше не вешает прогон навсегда;
+#       при таймауте — явный маркер "догонится повторным прогоном".
+#  FIX  GRUB: скан не-LTS ядер теперь по ВСЕМ /boot/vmlinuz-*, не только
+#       *xanmod* — на Ubuntu 26.04 stock-ядро 7.0 новее XanMod LTS 6.18 и
+#       молча перехватывало GRUB_DEFAULT=0 (потеря XanMod/BBRv3 после ребута).
+#  FIX  sysctl --system (перечитывал и 90-shieldnode.conf, откатывая его
+#       live-значения) заменён на sysctl -p только своих файлов.
+#  FIX  SETUP_DISABLE_UNATTENDED=0 теперь ЧЕСТНО возвращает авто-апдейты:
+#       удаляет 99-vpn-node-no-unattended и enable --now таймеры (раньше —
+#       только start на сессию, после ребута апдейты снова мёртвы).
+#  FIX  Kill-switch'и удаляют артефакты прошлых прогонов: DISABLE_FLOWTABLE,
+#       DISABLE_DATAPATH2 (вкл. vpn-fq-tune), SKIP_VGPU_BLACKLIST,
+#       DISABLE_THP_TUNE, DISABLE_IO_SCHED_TUNE, DISABLE_ADD_RANDOM,
+#       DISABLE_DIRTY_TUNE, SETUP_NO_ZRAM, SKIP_NOATIME (юнит; правки fstab
+#       не откатываются — есть бэкап), DISABLE_SSD_TUNE (всё семейство).
+#  FIX  datapath2 переименован 96- → 81-vpn-datapath2.conf: security-overrides
+#       shieldnode (90-) должны побеждать; старый 96- удаляется при прогоне.
+#  FIX  udp_rmem_min/udp_wmem_min=8MB УБРАНЫ: min-значения действуют В ОБХОД
+#       udp_mem pressure → потолок переставал быть защитой под пиком QUIC.
+#       Первоисточники (quic-go ~7.5MB, Hysteria2 16MB) поднимают только max.
+#  FIX  fq (7.12B): buckets 16384→32768 и применение к дочерним fq под mq
+#       (раньше — только single-queue root=fq, на multi-queue virtio был no-op).
+#  FIX  tcp_mem floor: min(65536, RAM_pages/8) — на 512MB-ноде клэмп 65536
+#       давал потолок 256MB = 50% RAM → swap-шторм раньше pressure.
+#  FIX  gro_flush_timeout=0 / napi_defer_hard_irqs=0 (low-latency сброс GRO)
+#       теперь opt-in: ENABLE_LOW_LATENCY_NIC=1 — на 20k+ сессиях батчинг GRO
+#       экономит CPU, сброс не измерен.
+#  FIX  Дрейф отчётности: баннер из $SCRIPT_VERSION; из summary убраны
+#       notsent_lowat (удалён в v5.0.5) и fwupd (убран из списка в v5.10.0).
+#  FIX  Зашитое имя интерфейса убрано из persistence: udev ring-rule теперь
+#       матчит en*/eth* с %k в RUN (миграция VM ens3→enp1s0 не ломала бы),
+#       новый vpn-fq-tune.sh резолвит default-iface в рантайме (rps-tuning.sh
+#       и nic-tuning.sh резолвили уже в v5.x — проверено аудитом).
+#  FIX  Удалена мёртвая ветка IRQBALANCE_BANNED_INTERRUPTS (irqbalance
+#       маскируется шагом 2.5 раньше 7.7 — ветка была недостижима).
+#  ADD  kdump-detect (Ubuntu 24.10+/26.04: default-on при ≥4 CPU и ≥6GB RAM,
+#       crashkernel 320-512MB): warn + opt-in снятие SETUP_DISABLE_KDUMP=1.
+#  ADD  dracut-aware пересборка initramfs (Ubuntu 26.04 перешла на dracut:
+#       update-initramfs может отсутствовать → fallback на dracut --force --kver,
+#       затем повторная проверка размера; нет обоих — явный warn, не молчание).
+#  ADD  ZRAM_ALGO (zstd по умолчанию; lz4 — меньше CPU на latency-чувствит.
+#       нодах) + ZRAM_RECOMPRESS_ALGO (kernel ≥6.6, напр. zstd для idle-страниц
+#       при lz4-primary).
+#  ADD  stack.conf: contract_schema=2 + conntrack_max/established_timeout +
+#       hw_flow_offload — shieldnode v4.x сможет валидировать shared keys.
+#  ADD  --help: раздел Environment variables дополнен всеми флагами v6.0.0.
+#  NOTE Ubuntu 26.04 (resolute) поддерживается (XanMod публикует resolute),
+#       но: stock 7.0 > XanMod 6.18 (см. FIX GRUB), dracut (см. ADD), kdump
+#       (см. ADD), APT 3. Прогнать на тестовой ноде перед флотом.
+#
 #  XRAY/REMNAWAVE NODE BUILDER v5.13.0 (datapath pack 2.0 — боевые находки node-perf)
 #  NEW  ШАГ 7.12A netdev_budget=600 / budget_usecs=8000 + tcp_max_tw_buckets=524288
 #       + tcp_mem по RAM (/etc/sysctl.d/96-vpn-datapath2.conf): дефолтный NAPI
@@ -104,7 +164,8 @@
 #
 #  XRAY/REMNAWAVE NODE BUILDER v5.10.1 (fix: packagekit purge вместо mask)
 #  Ядро XanMod LTS + BBRv3 + Полная оптимизация системы + MSS clamp + Diagnostics
-#  Поддерживает: Debian 12/13 (bookworm/trixie), Ubuntu 24.04+ (noble/plucky/…)
+#  Поддерживает: Debian 12/13 (bookworm/trixie), Ubuntu 24.04+ (noble/plucky/
+#  resolute/…)
 #  ВНИМАНИЕ: Ubuntu 22.04 (jammy) и 20.04 (focal) НЕ поддерживаются — XanMod не
 #  публикует для них ядра (404 на deb.xanmod.org). Скрипт это проверяет и выходит
 #  рано с понятным сообщением (см. guard в ШАГ 4).
@@ -364,7 +425,7 @@ set -o pipefail
 # ==============================================================================
 
 # v5.0: версия + repo URL для self-upgrade
-SCRIPT_VERSION="5.13.0"
+SCRIPT_VERSION="6.0.0"
 SCRIPT_REPO_URL="${SCRIPT_REPO_URL:-https://raw.githubusercontent.com/SpofyJet/node/main/vpn-node-setup.sh}"
 
 # v5.3.0 (fix #17): XanMod signing key ID вынесен в именованную константу.
@@ -797,7 +858,12 @@ for arg in "$@"; do
                     done
                     [ -f "$SNAP/rps-tuning.sh" ] && cp -a "$SNAP/rps-tuning.sh" /usr/local/sbin/
                     [ -f "$SNAP/nic-tuning.sh" ] && cp -a "$SNAP/nic-tuning.sh" /usr/local/sbin/
-                    sysctl --system >/dev/null 2>&1 || true
+                    # v6.0.0 (аудит №4): не sysctl --system (он перечитывает и
+                    # 90-shieldnode.conf, откатывая его live-значения) — только
+                    # свои файлы из snapshot'а.
+                    for _sf in "$SNAP/sysctl.d"/80-vpn-node-tuning.conf "$SNAP/sysctl.d"/81-vpn-datapath2.conf "$SNAP/sysctl.d"/96-vpn-datapath2.conf "$SNAP/sysctl.d"/96-ssd-io-tuning.conf; do
+                        [ -f "/etc/sysctl.d/$(basename "$_sf")" ] && sysctl -p "/etc/sysctl.d/$(basename "$_sf")" >/dev/null 2>&1 || true
+                    done
                     systemctl daemon-reload 2>/dev/null
                     systemctl restart rps-tuning.service nic-tuning.service 2>/dev/null || true
                     echo "  ✓ sysctl/systemd восстановлены"
@@ -880,6 +946,41 @@ Environment variables:
                    Используй только если нода стоит за CDN/middlebox который
                    может дропать SYN с TFO cookie. Пример:
                      DISABLE_TFO=1 sudo bash $HELP_INVOC --optimize
+
+  --- Флаги v6.0.0 (opt-in / opt-out) ---
+
+  ENABLE_FLOWTABLE=1
+                   Включить nftables flowtable (software fast-path). В v6.0.0
+                   ВЫКЛЮЧЕН по умолчанию: established-потоки идут мимо forward-
+                   цепочек — учёт/лимиты shieldnode ddos_protect для них не
+                   срабатывают. Принудительно запретить: DISABLE_FLOWTABLE=1.
+
+  ENABLE_HW_FLOW_OFFLOAD=1
+                   Разрешить hardware flow offload (flags offload), если NIC
+                   поддерживает. Работает только вместе с ENABLE_FLOWTABLE=1.
+                   Запретить принудительно: DISABLE_HW_FLOW_OFFLOAD=1.
+
+  ENABLE_LOW_LATENCY_NIC=1
+                   Принудительно сбрасывать gro_flush_timeout и
+                   napi_defer_hard_irqs в 0/0 (classic NAPI). Для маленьких
+                   нод (50-200 юзеров); на 20k+ сессиях батчинг выгоднее.
+
+  SETUP_DISABLE_KDUMP=1
+                   Снять резерв crashkernel (320-512MB RAM на Ubuntu ≥24.10)
+                   и выключить kdump. Полный эффект после reboot.
+                   По умолчанию — только предупреждение.
+
+  SETUP_DISABLE_UNATTENDED=0
+                   НЕ отключать unattended-upgrades и apt-таймеры
+                   (по умолчанию отключаются; при 0 — честно возвращаются).
+
+  SETUP_NO_ZRAM=1  Не настраивать zram; удалить его артефакты, если были.
+
+  ZRAM_ALGO=zstd   Алгоритм сжатия zram (по умолчанию zstd; lz4 = минимум CPU).
+
+  ZRAM_RECOMPRESS_ALGO=zstd
+                   Пережатие idle-страниц zram в более сильный алгоритм
+                   (kernel ≥6.6). Пусто (по умолчанию) = выключено.
 
   SCRIPT_REPO_URL  Переопределить URL для --check/--upgrade.
 
@@ -1357,9 +1458,9 @@ echo "   ██╔██╗ ██╔══██║██║╚██╗██�
 echo "  ██╔╝ ██╗██║  ██║██║ ╚████║██║ ╚═╝ ██║╚██████╔╝██████╔╝"
 echo "  ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝     ╚═╝ ╚═════╝ ╚═════╝ "
 echo -e "${NC}"
-echo -e "${BOLD}  XRAY/REMNAWAVE NODE BUILDER v5.3.3 (Universal: Optimize + Diagnose)${NC}"
+echo -e "${BOLD}  XRAY/REMNAWAVE NODE BUILDER v${SCRIPT_VERSION} (Universal: Optimize + Diagnose)${NC}"
 echo -e "  ${YELLOW}XanMod LTS + BBRv3 + Очистка + Сетевой стек + Conntrack + Gaming-friendly${NC}"
-echo -e "  ${GREEN}+ Safe boosts: notsent_lowat, GRO, ethtool, XPS, IRQ affinity, MSS clamp${NC}"
+echo -e "  ${GREEN}+ Safe boosts: GRO, ethtool, XPS, IRQ affinity, MSS clamp${NC}"
 echo ""
 if [ "$DRY_RUN" -eq 1 ]; then
     echo -e "  ${MAGENTA}${BOLD}*** DRY-RUN MODE: ядро НЕ будет установлено через apt ***${NC}"
@@ -1770,8 +1871,15 @@ APTEOF
     print_info "Обновлять вручную: apt-get update && apt-get upgrade (ядро XanMod придёт из его репо)."
 else
     RESTART_APT_TIMERS=1
-    print_info "unattended-upgrades ОСТАВЛЕН включённым (SETUP_DISABLE_UNATTENDED=0) — авто-секьюрити-апдейты работают."
-    print_info "Остановленные в pre-flight apt-таймеры запустятся обратно в конце прогона."
+    # v6.0.0 (аудит №5): раньше ветка =0 была «мнимым enable» — apt.conf.d-файл
+    # с APT::Periodic=0 и disabled-таймеры прошлого прогона оставались на месте,
+    # а вывод обещал работающие авто-апдейты. Теперь — честный re-enable.
+    if [ -f /etc/apt/apt.conf.d/99-vpn-node-no-unattended ]; then
+        rm -f /etc/apt/apt.conf.d/99-vpn-node-no-unattended
+        print_ok "Удалён /etc/apt/apt.conf.d/99-vpn-node-no-unattended (APT::Periodic снова активен)"
+    fi
+    systemctl enable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+    print_info "unattended-upgrades ВКЛЮЧЁН (SETUP_DISABLE_UNATTENDED=0): APT::Periodic активен, apt-таймеры enabled."
 fi
 
 for svc in "${SERVICES_TO_DISABLE[@]}"; do
@@ -1960,6 +2068,36 @@ NEEDRESTART_EOF
     fi
 else
     print_info "ШАГ 2.5 пропущен (SETUP_DISABLE_BG_SERVICES=0)"
+fi
+
+# --- kdump-detect (v6.0.0, аудит модернизации) ---
+# Ubuntu 24.10+/26.04 включает kdump ПО УМОЛЧАНИЮ при >=4 потоках CPU и >=6GB RAM
+# (ubuntu.com/server/docs/kernel-crash-dump): crashkernel молча резервирует
+# 320MB (2-4GB RAM) / 512MB (4-32GB RAM) — вторая статья расхода RAM на ноде.
+# MemTotal в /proc/meminfo это резерв УЖЕ исключает, поэтому тиры не ломаются —
+# но память теряется впустую (дампы ядра на headless VPN-ноде никто не читает).
+# Opt-in снятие: SETUP_DISABLE_KDUMP=1 (трогает cmdline → полный эффект после reboot).
+KDUMP_ACTIVE=0
+systemctl is-active kdump-tools.service >/dev/null 2>&1 && KDUMP_ACTIVE=1
+systemctl is-active kdump.service >/dev/null 2>&1 && KDUMP_ACTIVE=1
+KDUMP_SIZE=$(cat /sys/kernel/kexec_crash_size 2>/dev/null || echo 0)
+[ "${KDUMP_SIZE:-0}" -gt 0 ] 2>/dev/null && KDUMP_ACTIVE=1
+if [ "$KDUMP_ACTIVE" = "1" ]; then
+    if [ "${SETUP_DISABLE_KDUMP:-0}" = "1" ]; then
+        systemctl disable --now kdump-tools.service kdump.service 2>/dev/null || true
+        # Снимаем crashkernel= из cmdline через drop-in (не трогаем основной grub)
+        if [ -d /etc/default/grub.d ] || mkdir -p /etc/default/grub.d 2>/dev/null; then
+            printf '%s\n' '# vpn-node-setup v6.0.0: снятие crashkernel-резерва kdump (SETUP_DISABLE_KDUMP=1)' \
+                'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT crashkernel=0M"' \
+                > /etc/default/grub.d/99-vpn-node-no-kdump.cfg
+            command -v update-grub >/dev/null 2>&1 && update-grub >/dev/null 2>&1 || true
+        fi
+        print_ok "kdump отключён (SETUP_DISABLE_KDUMP=1): сервисы выкл, crashkernel=0M → RAM вернётся после reboot"
+        print_info "  Вернуть: удалить /etc/default/grub.d/99-vpn-node-no-kdump.cfg + update-grub + apt install kdump-tools"
+    else
+        print_warn "kdump АКТИВЕН (crashkernel-резерв: ${KDUMP_SIZE} байт) — на VPN-ноде это впустую занятая RAM."
+        print_info "  Снять резерв: SETUP_DISABLE_KDUMP=1 + повторный прогон (эффект после reboot)"
+    fi
 fi
 
 # --- Ограничение journald ---
@@ -2508,8 +2646,22 @@ if [ "$DRY_RUN" -eq 1 ]; then
     INSTALL_RESULT=0
 else
     echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════${NC}"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "$KERNEL_PKG"
+    # v6.0.0 (аудит №2): stall-защита большого скачивания (~100-150MB .deb).
+    # Боевой сценарий: РФ-нода, DPI сталлит deb.xanmod.org — apt висел
+    # бесконечно, Ctrl+C ломал dpkg посреди транзакции. Теперь:
+    #   - Acquire::Timeout=30 на http/https + Retries=2 (как у apt-get update)
+    #   - timeout 900 вокруг всего install (watchdog последней линии)
+    #   - rc=124/прерывание → понятный маркер: частичное состояние лечится
+    #     повторным прогоном (dpkg --audit в ШАГ 1.5 уже это чинит).
+    APT_NET_OPTS=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=2 -o Acquire::Queue-Mode=host)
+    timeout 900 env DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_NET_OPTS[@]}" "$KERNEL_PKG"
     INSTALL_RESULT=$?
+    if [ "$INSTALL_RESULT" -eq 124 ]; then
+        echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════${NC}"
+        print_error "Установка ядра ПРЕРВАНА watchdog'ом (900s) — вероятно, DPI-сталл deb.xanmod.org."
+        print_info "Частичное состояние безопасно: повторный прогон скрипта догонит установку"
+        print_info "(dpkg --audit/configure -a выполняется в ШАГ 1.5). Можно перезапустить сразу."
+    fi
     echo -e "${YELLOW}═══════════════════════════════════════════════════════════════════${NC}"
     echo ""
 
@@ -2644,7 +2796,17 @@ if [ $INSTALL_RESULT -eq 0 ]; then
             if [ "$INITRD_SIZE_MB" -lt 10 ]; then
                 print_warn "initramfs подозрительно маленький: ${INITRD_SIZE_MB}MB (ожидалось >40MB)"
                 print_status "Пересобираем initramfs..."
-                if update-initramfs -u -k "$NEW_KERNEL_VERSION" 2>&1 | tail -5; then
+                # v6.0.0: Ubuntu 26.04 перешла на dracut — update-initramfs может
+                # отсутствовать. Пробуем оба генератора (оба идемпотентны).
+                if command -v update-initramfs >/dev/null 2>&1; then
+                    update-initramfs -u -k "$NEW_KERNEL_VERSION" 2>&1 | tail -5
+                elif command -v dracut >/dev/null 2>&1; then
+                    dracut --force --kver "$NEW_KERNEL_VERSION" 2>&1 | tail -5
+                else
+                    print_warn "Нет ни update-initramfs, ни dracut — пересборка невозможна"
+                    false
+                fi
+                if [ -f "$NEW_INITRD" ]; then
                     INITRD_SIZE=$(stat -c%s "$NEW_INITRD" 2>/dev/null)
                     INITRD_SIZE_MB=$((INITRD_SIZE / 1048576))
                     if [ "$INITRD_SIZE_MB" -lt 10 ]; then
@@ -2748,18 +2910,26 @@ if [ $INSTALL_RESULT -eq 0 ]; then
                 # выше LTS при sort -V). Если не-LTS ядер нет — GRUB_DEFAULT=0: первый
                 # entry = самый свежий LTS, point-release'ы подхватываются автоматически.
                 NONLTS_PRESENT=0
-                for vk in /boot/vmlinuz-*xanmod*; do
+                # v6.0.0 (аудит №3): сканируем ВСЕ /boot/vmlinuz-*, а не только
+                # *xanmod*. Раньше stock-ядро Ubuntu HWE (6.11/6.14) или Ubuntu
+                # 26.04 (7.0) — новее XanMod LTS 6.18 по sort -V — молча
+                # перехватывало GRUB_DEFAULT=0: нода грузилась на stock без
+                # BBRv3/XanMod. Теперь pin ставится, если самое свежее ядро
+                # в /boot — НЕ наш LTS (любой: MAIN-xanmod, stock, HWE).
+                NEWEST_IN_BOOT=""
+                for vk in /boot/vmlinuz-*; do
                     [ -e "$vk" ] || continue
-                    vmm=$(basename "$vk" | sed 's/^vmlinuz-//' | grep -oE '^[0-9]+\.[0-9]+' | head -1)
-                    vk_is_lts=0
-                    for bb in "${KNOWN_LTS_BRANCHES[@]}"; do
-                        [ "$vmm" = "$bb" ] && vk_is_lts=1 && break
-                    done
-                    if [ "$vk_is_lts" -eq 0 ]; then
-                        NONLTS_PRESENT=1
-                        break
+                    vfull=$(basename "$vk" | sed 's/^vmlinuz-//')
+                    if [ -z "$NEWEST_IN_BOOT" ]; then
+                        NEWEST_IN_BOOT="$vfull"
+                    else
+                        NEWEST_IN_BOOT=$(printf '%s\n%s\n' "$NEWEST_IN_BOOT" "$vfull" | sort -V | tail -1)
                     fi
                 done
+                if [ -n "$NEWEST_IN_BOOT" ] && [ "$NEWEST_IN_BOOT" != "$NEW_KERNEL_VERSION" ]; then
+                    NONLTS_PRESENT=1
+                    print_info "Свежее ядро в /boot: $NEWEST_IN_BOOT (наш LTS: $NEW_KERNEL_VERSION)"
+                fi
                 # Бэкап (один раз — если ещё нет)
                 if [ ! -f /etc/default/grub.vpn-node-builder-backup ]; then
                     cp /etc/default/grub /etc/default/grub.vpn-node-builder-backup 2>/dev/null
@@ -2772,7 +2942,7 @@ if [ $INSTALL_RESULT -eq 0 ]; then
                 sed -i '/^# После ребута на LTS повторный прогон/d' /etc/default/grub
                 sed -i '/^# v5.3.3: только LTS-ядра/d' /etc/default/grub
                 if [ "$NONLTS_PRESENT" -eq 1 ]; then
-                    print_status "В /boot есть не-LTS xanmod — пиню GRUB_DEFAULT на LTS ($NEW_KERNEL_VERSION)..."
+                    print_status "В /boot есть ядро новее нашего LTS (не-LTS xanmod или stock) — пиню GRUB_DEFAULT на LTS ($NEW_KERNEL_VERSION)..."
                     LTS_MENU_TITLE="Ubuntu, with Linux ${NEW_KERNEL_VERSION}"
                     # На Debian title будет "Debian GNU/Linux, with Linux ..."
                     if grep -qi '^ID=debian' /etc/os-release 2>/dev/null; then
@@ -3297,29 +3467,17 @@ net.ipv4.tcp_keepalive_time = 300
 net.ipv4.tcp_keepalive_probes = 5
 net.ipv4.tcp_keepalive_intvl = 15
 
-# === UDP Socket Buffer Floor (v5.1.0 — CRITICAL FIX) ===
-# Default kernel udp_rmem_min/udp_wmem_min = 4096 (4 KB per socket).
-# Это убивает любой высоконагруженный UDP трафик на VPN-ноде:
-#   - QUIC outbound (Xray к Cloudflare/Google/Meta — HTTP/3 на современном вебе)
-#   - Caddy HTTP/3 listener (входящие клиенты с Chrome/Safari/Firefox HTTP/3)
-#   - Hysteria2 (если используется в стэке)
-#   - WireGuard, Tuic, DNS (53/udp)
-# При 500+ UDP socket'ов с bursty трафиком kernel дропает датаграммы в
-# RcvbufErrors (visible в /proc/net/snmp).
-#
-# Verified в production (causal-violet-pike, 5895 active TCP + 528 UDP):
-#   ДО fix: RcvbufErrors = 82183 (накопленные), растут на десятки/час
-#   ПОСЛЕ fix: RcvbufErrors growth = 0/30s устойчиво
-#   Источник UDP на тестовой ноде: Caddy HTTP/3 (UDP/443) +
-#   528 Xray outbound QUIC сокетов к destination'ам
-#
-# 8 MB подобран эмпирически — даёт reasonable BDP для QUIC на
-# 100-500 Mbps клиентах при RTT 50-200ms, без избыточного memory pressure.
-# Это floor (минимум для socket buffer), не reserved — kernel выделяет
-# на основании реального BDP, но не опускается ниже этого значения когда
-# global udp_mem pressure высокий.
-net.ipv4.udp_rmem_min = 8388608
-net.ipv4.udp_wmem_min = 8388608
+# === UDP Socket Buffers (v6.0.0 — udp_*_min УБРАНЫ) ===
+# v5.1.0 ставила udp_rmem_min/udp_wmem_min=8MB против RcvbufErrors на QUIC.
+# Аудит v6.0.0: min-семантика — «каждый UDP-сокет МОЖЕТ принять столько, ДАЖЕ
+# когда system-wide udp_mem pressure превышен» (Documentation/networking/
+# ip-sysctl.rst). 8MB × тысячи QUIC-сокетов = udp_mem-потолок перестаёт быть
+# защитой именно под пиковой нагрузкой. Первоисточники (quic-go wiki ~7.5MB,
+# Hysteria2 docs 16MB) поднимают только rmem_max/wmem_max, min не трогают.
+# Анти-RcvbufErrors фикс v5.1.0 сохраняется через tier-aware rmem_default/
+# wmem_default ниже (буфер по умолчанию для сокетов без SO_RCVBUF) — min под
+# давлением остаётся ядерным дефолтом 4096, что и требуется для честного
+# pressure-учёта.
 
 # === TCP Window Scale (v5.2.0 — ВЕРНУЛИ дефолт ядра 1; было -2) ===
 # v5.2.0 FIX: -2 заставлял ядро АНОНСИРОВАТЬ окно больше, чем буфер реально
@@ -3382,8 +3540,12 @@ net.ipv4.tcp_adv_win_scale = 1
 # === File Descriptors (ядро, system-wide) ===
 fs.file-max = 2097152
 
-# === Inotify Limits (важно при 10k+ соединений Xray) ===
-# Дефолты Linux (8192/128) не справляются с большим числом сокетов/файлов
+# === Inotify Limits ===
+# v6.0.0: честное обоснование. inotify считает ФАЙЛОВЫЕ watches, не сокеты —
+# к «10k+ соединений Xray» отношения не имеет (прежний комментарий был
+# карго-культом). Реальные потребители на ноде: systemd (per-unit watches),
+# dockerd/containerd, crowdsec (tail логов), агенты панели. Значения безвредны
+# и дёшевы (память выделяется по факту watches) — оставлены как headroom.
 fs.inotify.max_user_watches = 524288
 fs.inotify.max_user_instances = 8192
 fs.inotify.max_queued_events = 65536
@@ -3419,9 +3581,8 @@ if [ "$TOTAL_MEM_MB" -le 1200 ]; then
 # v5.3.1: rmem_max/wmem_max 4MB/2MB → 8MB/8MB. Это ПОТОЛОК для setsockopt, который
 # делают QUIC-приложения (Caddy HTTP/3, Xray-QUIC, Hysteria2). Раньше quic-go
 # писал "failed to sufficiently increase buffer" (хочет 7.5MB, потолок резал на
-# 4MB/2MB) и QUIC-send упирался жёстко в 2MB. 8MB закрывает quic-go (7.5MB) и
-# согласуется с udp_rmem_min/udp_wmem_min=8MB (раньше floor 8MB > потолка 4MB —
-# нестыковка). Память НЕ резервируется (это ceiling, не default — rmem_default
+# 4MB/2MB) и QUIC-send упирался жёстко в 2MB. 8MB закрывает quic-go (7.5MB).
+# Память НЕ резервируется (это ceiling, не default — rmem_default
 # ниже остаётся 256KB), а агрегат UDP ограничен udp_mem (~360MB cap), runaway нет.
 # tcp_rmem/tcp_wmem НЕ трогаем: TCP-автотюн (Reality) не лимитится rmem_max и на
 # 1GB ноде ему хватает 4MB/2MB.
@@ -3550,6 +3711,14 @@ print_status "Применяем sysctl конфигурацию (tuning + connt
 if [ -f "$SYSCTL_FILE_CONSOLIDATED" ]; then
     sysctl -p "$SYSCTL_FILE_CONSOLIDATED" 2>/dev/null | tail -5
 fi
+# v6.0.0 (аудит №14): udp_rmem_min/udp_wmem_min убраны из файла, но на нодах,
+# настроенных v5.x, live-значение 8MB доживёт до ребута. Сбрасываем на дефолт
+# явно — конвергенция без ожидания reboot.
+if [ "$(sysctl -n net.ipv4.udp_rmem_min 2>/dev/null)" = "8388608" ]; then
+    sysctl -w net.ipv4.udp_rmem_min=4096 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.udp_wmem_min=4096 >/dev/null 2>&1 || true
+    print_info "udp_rmem_min/wmem_min сброшены 8MB → 4096 (kernel default): min обходил udp_mem pressure"
+fi
 
 # === v5.4.0 (stage1): BBR RUNTIME ACTIVATION + BBRv3 DETECT ===
 # Раньше: запись в sysctl-файл есть, но tcp_congestion_control активировался
@@ -3610,7 +3779,11 @@ print_ok "Sysctl применён (BBR: $BBR_RUNTIME_STATUS; IPv6 — после
 # ==============================================================================
 # На 1-2GB ноде пики (Xray+CrowdSec+QUIC-буферы) → OOM-kill Xray (downtime для
 # всех). zram = сжатый swap в RAM: гасит пики без диск-износа и сетевой латентности.
-# Только TIER1/2 и только если swap отсутствует. Отключить: SETUP_NO_ZRAM=1.
+# Только TIER1/2 и только если swap отсутствует. Отключить: SETUP_NO_ZRAM=1
+# (удаляет и артефакты прошлых прогонов). Алгоритм: ZRAM_ALGO=lz4|zstd
+# (дефолт zstd — лучше ratio; lz4 — ~2.5x IOPS, меньше CPU на latency-нодах).
+# ZRAM_RECOMPRESS_ALGO=zstd (kernel >= 6.6): idle/huge-страницы дожимаются
+# вторичным алгоритмом — имеет смысл при ZRAM_ALGO=lz4.
 if [ "$TOTAL_MEM_MB" -le 2500 ] && [ "${SETUP_NO_ZRAM:-0}" != "1" ]; then
     print_header "ШАГ 7.4: ZRAM SWAP (anti-OOM для $PROFILE_NAME)"
     EXISTING_SWAP=$(awk 'NR>1{print}' /proc/swaps 2>/dev/null | wc -l)
@@ -3622,7 +3795,9 @@ if [ "$TOTAL_MEM_MB" -le 2500 ] && [ "${SETUP_NO_ZRAM:-0}" != "1" ]; then
         # zram-size: 50% RAM, но не больше 512MB (на 1-2GB ноде этого достаточно).
         ZRAM_MB=$(( TOTAL_MEM_MB / 2 ))
         [ "$ZRAM_MB" -gt 512 ] && ZRAM_MB=512
-        print_status "Настраиваю zram-swap: ${ZRAM_MB}MB (zstd)..."
+        ZRAM_ALGO="${ZRAM_ALGO:-zstd}"
+        ZRAM_RECOMPRESS_ALGO="${ZRAM_RECOMPRESS_ALGO:-}"
+        print_status "Настраиваю zram-swap: ${ZRAM_MB}MB (${ZRAM_ALGO})..."
 
         if modprobe zram 2>/dev/null; then
             # Генератор устройства + systemd-unit для персистентности после ребута.
@@ -3631,6 +3806,8 @@ if [ "$TOTAL_MEM_MB" -le 2500 ] && [ "${SETUP_NO_ZRAM:-0}" != "1" ]; then
 # Auto-generated by vpn-node-setup v5.7.0 (fix #13 + zram writeback): zram-swap anti-OOM.
 set -e
 ZRAM_MB=${ZRAM_MB}
+ZRAM_ALGO=${ZRAM_ALGO}
+ZRAM_RECOMPRESS_ALGO=${ZRAM_RECOMPRESS_ALGO}
 # v5.7.0: writeback — выгрузка incompressible/idle ("холодных") страниц из
 # zram на выделенный block device, освобождая RAM. Задаётся оператором:
 #   ZRAM_WRITEBACK_DEV=/dev/sdXN sudo bash setup.sh --optimize
@@ -3642,18 +3819,24 @@ if [ -n "\$WB_DEV" ] && [ -b "\$WB_DEV" ]; then
     # --find --size этого не умеет, поэтому настраиваем устройство вручную.
     ZNUM=\$(cat /sys/class/zram-control/hot_add 2>/dev/null || echo 0)
     DEV=/dev/zram\${ZNUM}
-    echo zstd > /sys/block/zram\${ZNUM}/comp_algorithm 2>/dev/null || true
+    echo \${ZRAM_ALGO} > /sys/block/zram\${ZNUM}/comp_algorithm 2>/dev/null || true
     echo "\$WB_DEV" > /sys/block/zram\${ZNUM}/backing_dev 2>/dev/null || true
     echo \${ZRAM_MB}M > /sys/block/zram\${ZNUM}/disksize 2>/dev/null || true
 else
     # Берём первое свободное zram-устройство (не ломаем чужие, напр. zram0 от systemd).
-    DEV=\$(zramctl --find --size \${ZRAM_MB}M --algorithm zstd 2>/dev/null) || {
+    DEV=\$(zramctl --find --size \${ZRAM_MB}M --algorithm \${ZRAM_ALGO} 2>/dev/null) || {
         # Fallback для старых zramctl без --find
         [ -e /dev/zram0 ] || echo 1 > /sys/class/zram-control/hot_add 2>/dev/null || true
         DEV=/dev/zram0
-        echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+        echo \${ZRAM_ALGO} > /sys/block/zram0/comp_algorithm 2>/dev/null || true
         echo \${ZRAM_MB}M > /sys/block/zram0/disksize 2>/dev/null || true
     }
+fi
+# v6.0.0: recompress (kernel >= 6.6) — idle/huge-страницы дожимаются вторичным
+# алгоритмом (типично: primary lz4 для скорости + recompress zstd для ratio).
+# Best-effort: на старых ядрах knob отсутствует → молча пропускаем.
+if [ -n "\$ZRAM_RECOMPRESS_ALGO" ] && [ -w "/sys/block/\${DEV#/dev/}/recompress" ]; then
+    echo "algo=\$ZRAM_RECOMPRESS_ALGO idle" > "/sys/block/\${DEV#/dev/}/recompress" 2>/dev/null || true
 fi
 mkswap "\$DEV" >/dev/null 2>&1 || true
 # priority 100 — zram выше любого диск-swap (быстрее).
@@ -3680,7 +3863,7 @@ ZUNIT
             if systemctl enable --now vpn-zram.service >/dev/null 2>&1; then
                 sleep 1
                 if grep -q zram /proc/swaps 2>/dev/null; then
-                    print_ok "zram-swap активен (${ZRAM_MB}MB, zstd, priority 100) — переживёт reboot"
+                    print_ok "zram-swap активен (${ZRAM_MB}MB, ${ZRAM_ALGO}, priority 100) — переживёт reboot"
                     [ -n "${ZRAM_WRITEBACK_DEV:-}" ] && \
                         print_info "writeback: ${ZRAM_WRITEBACK_DEV} (холодные страницы → диск, RAM свободнее)"
                 else
@@ -3707,6 +3890,18 @@ ZSYS_EOF
             print_warn "Модуль zram недоступен в текущем ядре — zram-swap пропущен (применится после ребута на XanMod LTS)"
             print_info "После ребута повтори --optimize чтобы поднять zram на новом ядре."
         fi
+    fi
+fi
+
+# v6.0.0 (аудит №6): явный SETUP_NO_ZRAM=1 сносит артефакты прошлых прогонов
+# (раньше флаг только пропускал установку — старый zram продолжал жить).
+if [ "${SETUP_NO_ZRAM:-0}" = "1" ]; then
+    if [ -f /etc/systemd/system/vpn-zram.service ] || [ -f /usr/local/sbin/vpn-zram.sh ]; then
+        systemctl disable --now vpn-zram.service 2>/dev/null || true
+        for _zd in /dev/zram*; do [ -e "$_zd" ] && swapoff "$_zd" 2>/dev/null || true; done
+        rm -f /etc/systemd/system/vpn-zram.service /usr/local/sbin/vpn-zram.sh /etc/sysctl.d/99-vpn-zram.conf
+        systemctl daemon-reload 2>/dev/null || true
+        print_ok "zram удалён по SETUP_NO_ZRAM=1 (unit + генератор + sysctl; swap off)"
     fi
 fi
 
@@ -4065,11 +4260,11 @@ else
                         ETHTOOL_BIN=$(command -v ethtool)
                         mkdir -p /etc/udev/rules.d
                         cat > /etc/udev/rules.d/99-vpn-nic-rings.rules <<UDEV_RINGS
-# Generated by vpn-node-setup v5.3.0 (fix #8): персистентные NIC ring buffers.
+# Generated by vpn-node-setup v6.0.0: персистентные NIC ring buffers.
 # Применяются на device-add (до трафика) — без per-boot link-flap.
-# Матчим по имени интерфейса на момент установки. Если NIC переименуют —
-# обнови правило (или перезапусти --optimize).
-ACTION=="add", SUBSYSTEM=="net", KERNEL=="$IFACE", RUN+="$ETHTOOL_BIN -G $IFACE rx $MAX_RX tx $MAX_TX"
+# v6.0.0: матч по ШАБЛОНУ имён (en*/eth*), а не по зашитому имени интерфейса —
+# правило переживает переименование NIC при миграции VM (ens3 → enp1s0).
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="en*|eth*", RUN+="$ETHTOOL_BIN -G %k rx $MAX_RX tx $MAX_TX"
 UDEV_RINGS
                         udevadm control --reload 2>/dev/null || true
                         print_ok "udev-правило сохранено: /etc/udev/rules.d/99-vpn-nic-rings.rules (flap-free персистентность)"
@@ -4117,45 +4312,41 @@ UDEV_RINGS
         print_info "ethtool -c не поддерживается ($IFACE, вероятно virtio_net) — coalescing пропущен"
     fi
 
-    # === БУСТ 3: GRO Flush Timeout + napi_defer_hard_irqs ===
-    # v5.0.5: ВОЗВРАЩЕНО к kernel default (0/0).
-    # Раньше: gro_flush=50µs, napi_defer=1 — батчинг прерываний для экономии CPU.
-    # Проблема: kernel docs прямо говорят "choosing a large value for
-    # gro_flush_timeout will defer IRQs to allow for better batch processing,
-    # but will induce latency when the system is not fully loaded".
-    # На VPN-relay ноде с малым/средним числом активных юзеров (50-200) система
-    # часто "not fully loaded" → defer добавляет 50µs jitter на TX path → может
-    # усиливать ощущение micro-stall в видеостримах.
-    # Экономия CPU 15-25% softirq заметна только при пиковой нагрузке (1000+
-    # юзеров), для типичной ноды эта экономия не оправдывает jitter.
-    #
-    # Если нода действительно перегружена (cpu softirq >50% на ядро) — можно
-    # вернуть значения вручную:
-    #   echo 50000 > /sys/class/net/"$IFACE"/gro_flush_timeout
-    #   echo 1 > /sys/class/net/"$IFACE"/napi_defer_hard_irqs
-    print_status "Сбрасываю GRO flush + napi defer к kernel default (classic NAPI)..."
-    GRO_PATH="/sys/class/net/$IFACE/gro_flush_timeout"
-    NAPI_PATH="/sys/class/net/$IFACE/napi_defer_hard_irqs"
+    # === БУСТ 3: GRO Flush Timeout + napi_defer_hard_irqs (opt-in, v6.0.0) ===
+    # v6.0.0: по умолчанию НЕ трогаем. Kernel default (0/0) уже означает classic
+    # NAPI, но если админ/драйвер выставил батчинг (например 50000/1) — на
+    # нагруженной ноде (20k+ сессий) он экономит 15-25% softirq CPU, и насильный
+    # сброс был бы вреден. Принудительный сброс в 0/0 (low-latency режим) теперь
+    # только по явному запросу: ENABLE_LOW_LATENCY_NIC=1 — имеет смысл для
+    # маленьких нод (50-200 юзеров), где система "not fully loaded" и defer-
+    # логика может добавлять jitter на TX path (micro-stall в видеостримах).
+    if [ "${ENABLE_LOW_LATENCY_NIC:-0}" = "1" ]; then
+        print_status "ENABLE_LOW_LATENCY_NIC=1: сбрасываю GRO flush + napi defer к 0/0 (classic NAPI)..."
+        GRO_PATH="/sys/class/net/$IFACE/gro_flush_timeout"
+        NAPI_PATH="/sys/class/net/$IFACE/napi_defer_hard_irqs"
 
-    if [ -w "$GRO_PATH" ] && [ -w "$NAPI_PATH" ]; then
-        OLD_GRO=$(cat "$GRO_PATH" 2>/dev/null)
-        OLD_NAPI=$(cat "$NAPI_PATH" 2>/dev/null)
-        echo 0 > "$GRO_PATH" 2>/dev/null
-        echo 0 > "$NAPI_PATH" 2>/dev/null
-        NEW_GRO=$(cat "$GRO_PATH" 2>/dev/null)
-        NEW_NAPI=$(cat "$NAPI_PATH" 2>/dev/null)
-        if [ "$NEW_GRO" = "0" ] && [ "$NEW_NAPI" = "0" ]; then
-            if [ "$OLD_GRO" != "0" ] || [ "$OLD_NAPI" != "0" ]; then
-                print_ok "GRO flush + napi defer: ($OLD_GRO/$OLD_NAPI) → (0/0) — classic NAPI"
-                NIC_BOOSTS_APPLIED+=("GRO defer reset to 0 (classic NAPI)")
+        if [ -w "$GRO_PATH" ] && [ -w "$NAPI_PATH" ]; then
+            OLD_GRO=$(cat "$GRO_PATH" 2>/dev/null)
+            OLD_NAPI=$(cat "$NAPI_PATH" 2>/dev/null)
+            echo 0 > "$GRO_PATH" 2>/dev/null
+            echo 0 > "$NAPI_PATH" 2>/dev/null
+            NEW_GRO=$(cat "$GRO_PATH" 2>/dev/null)
+            NEW_NAPI=$(cat "$NAPI_PATH" 2>/dev/null)
+            if [ "$NEW_GRO" = "0" ] && [ "$NEW_NAPI" = "0" ]; then
+                if [ "$OLD_GRO" != "0" ] || [ "$OLD_NAPI" != "0" ]; then
+                    print_ok "GRO flush + napi defer: ($OLD_GRO/$OLD_NAPI) → (0/0) — classic NAPI"
+                    NIC_BOOSTS_APPLIED+=("GRO defer reset to 0 (classic NAPI)")
+                else
+                    print_info "GRO flush + napi defer уже в kernel default (0/0)"
+                fi
             else
-                print_info "GRO flush + napi defer уже в kernel default (0/0)"
+                print_info "GRO flush не применился, возможно read-only sysfs"
             fi
         else
-            print_info "GRO flush не применился, возможно read-only sysfs"
+            print_info "GRO flush недоступен (старое ядро или виртуалка)"
         fi
     else
-        print_info "GRO flush недоступен (старое ядро или виртуалка)"
+        print_info "GRO flush/napi defer не трогаем (low-latency сброс — opt-in: ENABLE_LOW_LATENCY_NIC=1)"
     fi
 
     # === БУСТ 3.5: txqueuelen=10000 ===
@@ -4217,8 +4408,7 @@ UDEV_RINGS
 
     # === БУСТ 5: IRQ Affinity (распределение прерываний RX/TX очередей по CPU) ===
     # Без этого все прерывания сыпятся на CPU0 → бутылочное горлышко на 10G/multi-queue
-    # ВАЖНО: irqbalance конфликтует с ручным affinity — отключаем его ТОЛЬКО если
-    # реально применили affinity (на single-queue NIC он полезен — пусть работает)
+    # irqbalance уже отключён в ШАГЕ 2.5 (конфликтует с ручной affinity).
     if [ "$CPUS" -gt 1 ] && [ -n "$IFACE" ]; then
         print_status "Анализируем IRQ сетевого интерфейса $IFACE..."
 
@@ -4234,24 +4424,13 @@ UDEV_RINGS
             echo -e "    ├─ IRQ найдено: ${GREEN}$IRQ_COUNT${NC}"
             echo -e "    └─ Стратегия: round-robin по $CPUS CPU"
 
-            # Проверяем не работает ли irqbalance — если да, исключаем NIC IRQ из его контроля
-            # вместо полного отключения (irqbalance полезен для других IRQ — диски, USB)
-            # v5.3.0 (fix #15): убрана дохлая переменная IRQBALANCE_ACTIVE (нигде не читалась).
+            # v6.0.0: мёртвая ветка IRQBALANCE_BANNED_INTERRUPTS удалена — такой
+            # переменной в mainline irqbalance нет (бан возможен только через
+            # --banirq в аргументах демона), к тому же сервис отключён в ШАГЕ 2.5.
+            # Страховка на случай ручного включения после шага 2.5:
             if systemctl is-active irqbalance &>/dev/null; then
-                print_status "Обнаружен активный irqbalance — настраиваем IRQBALANCE_BANNED_CPULIST..."
-
-                # Создаём banned IRQ список для irqbalance (не отключаем сервис целиком)
-                mkdir -p /etc/default
-                BANNED_IRQS=$(echo "$NIC_IRQS" | tr '\n' ' ' | sed 's/ $//')
-
-                # Пишем drop-in конфиг (не трогаем основной /etc/default/irqbalance)
-                if [ -f /etc/default/irqbalance ]; then
-                    # Удаляем старую запись если была
-                    sed -i '/^IRQBALANCE_BANNED_INTERRUPTS=/d' /etc/default/irqbalance
-                    echo "IRQBALANCE_BANNED_INTERRUPTS=\"$BANNED_IRQS\"" >> /etc/default/irqbalance
-                    systemctl restart irqbalance 2>/dev/null || true
-                    print_ok "irqbalance настроен: NIC IRQs ($IRQ_COUNT шт.) исключены из его управления"
-                fi
+                print_warn "irqbalance снова активен — отключаем (перетирает статическую IRQ-affinity)"
+                systemctl disable --now irqbalance >> "$LOG_FILE" 2>&1 || true
             fi
 
             # Применяем round-robin affinity: IRQ N → CPU (N % CPUS)
@@ -4334,10 +4513,8 @@ if command -v ethtool >/dev/null 2>&1; then
     fi
 fi
 
-# GRO flush + napi defer — v5.0.5: classic NAPI (0/0), без deferred IRQs.
-# Раньше 50µs/1 — добавляло jitter на TX path под лёгкой нагрузкой.
-[ -w "/sys/class/net/"$IFACE"/gro_flush_timeout" ] && echo 0 > "/sys/class/net/"$IFACE"/gro_flush_timeout"
-[ -w "/sys/class/net/"$IFACE"/napi_defer_hard_irqs" ] && echo 0 > "/sys/class/net/"$IFACE"/napi_defer_hard_irqs"
+# (v6.0.0: сброс gro_flush/napi_defer в 0/0 — opt-in, добавляется генератором
+#  ниже только при ENABLE_LOW_LATENCY_NIC=1; по умолчанию не трогаем батчинг)
 
 # v4.13: txqueuelen=10000 для virtio (default 1000 узкое горлышко на пиках
 # исходящего трафика). На физических NIC default уже 1000-10000, lift'ить
@@ -4376,8 +4553,19 @@ if [ "$CPUS" -gt 1 ]; then
     fi
 fi
 
-exit 0
 NICEOF
+        # v6.0.0: low-latency сброс GRO defer — opt-in (ENABLE_LOW_LATENCY_NIC=1).
+        # Добавляем ПОСЛЕ основного heredoc: флаг живёт на момент генерации,
+        # а сам скрипт пересоздаётся целиком при каждом прогоне (самолечение).
+        if [ "${ENABLE_LOW_LATENCY_NIC:-0}" = "1" ]; then
+            cat >> /usr/local/sbin/nic-tuning.sh <<'NICEOF_LL'
+
+# ENABLE_LOW_LATENCY_NIC=1: принудительный classic NAPI (0/0), без deferred IRQs
+[ -w "/sys/class/net/"$IFACE"/gro_flush_timeout" ] && echo 0 > "/sys/class/net/"$IFACE"/gro_flush_timeout"
+[ -w "/sys/class/net/"$IFACE"/napi_defer_hard_irqs" ] && echo 0 > "/sys/class/net/"$IFACE"/napi_defer_hard_irqs"
+NICEOF_LL
+        fi
+        echo "exit 0" >> /usr/local/sbin/nic-tuning.sh
         chmod +x /usr/local/sbin/nic-tuning.sh
 
         cat > /etc/systemd/system/nic-tuning.service <<'SVCEOF'
@@ -4663,9 +4851,36 @@ print_header "ШАГ 7.9: FLOWTABLE (software flow offloading)"
 
 FLOWTABLE_STATUS="skipped"
 
-if [ "${DISABLE_FLOWTABLE:-0}" = "1" ]; then
-    print_info "DISABLE_FLOWTABLE=1 — flow offloading выключен оператором"
-    FLOWTABLE_STATUS="disabled by operator"
+# v6.0.0 (аудит №10-12, BREAKING): шаг переведён на OPT-IN.
+# Причины:
+#   1) Контракт стека описывает flowtable/hw-offload как opt-in, а фактически
+#      было opt-out (DISABLE_*). Приводим код к контракту.
+#   2) На типовом деплое remnanode (network_mode: host по docs.rw) forward-
+#      трафика на ноде НЕТ → flowtable оставался пустым: польза ~0.
+#   3) Established-потоки в fast-path обходят forward-цепочки shieldnode
+#      (ddos_protect) — их per-packet учёт по offloaded-потокам слепнет.
+# Включить осознанно: ENABLE_FLOWTABLE=1 (software), + ENABLE_HW_FLOW_OFFLOAD=1
+# (hw-probe). DISABLE_FLOWTABLE=1 принимается как legacy-алиас "выключено".
+FLOWTABLE_WANTED=0
+if [ "${ENABLE_FLOWTABLE:-0}" = "1" ] && [ "${DISABLE_FLOWTABLE:-0}" != "1" ]; then
+    FLOWTABLE_WANTED=1
+fi
+
+if [ "$FLOWTABLE_WANTED" = "0" ]; then
+    if [ "${DISABLE_FLOWTABLE:-0}" = "1" ]; then
+        print_info "DISABLE_FLOWTABLE=1 — flow offloading выключен оператором"
+    else
+        print_info "Flow offloading выключен по умолчанию (v6.0.0: opt-in). Включить: ENABLE_FLOWTABLE=1"
+    fi
+    FLOWTABLE_STATUS="disabled (opt-in since v6.0.0)"
+    # v6.0.0 (аудит №6): убираем артефакты прошлых прогонов, где шаг был opt-out.
+    if [ -f /etc/nftables.d/vpn-node-flowtable.conf ] || [ -f /etc/systemd/system/vpn-flowtable.service ]; then
+        systemctl disable --now vpn-flowtable.service 2>/dev/null || true
+        rm -f /etc/systemd/system/vpn-flowtable.service /etc/nftables.d/vpn-node-flowtable.conf
+        nft delete table inet vpn_node_flowtable 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+        print_ok "Артефакты flowtable прошлых прогонов удалены (unit + nft-конфиг + live-таблица)"
+    fi
 elif ! command -v nft >/dev/null 2>&1; then
     print_info "nft не найден — flowtable пропущен (MSS clamp тоже был пропущен)"
     FLOWTABLE_STATUS="skipped (no nftables)"
@@ -4677,7 +4892,11 @@ elif [ -z "$IFACE" ]; then
     fi
 fi
 
-if [ "$FLOWTABLE_STATUS" = "skipped" ]; then
+if [ "$FLOWTABLE_WANTED" = "1" ] && [ "$FLOWTABLE_STATUS" = "skipped" ]; then
+    # Предупреждение о взаимодействии с shieldnode (аудит №11): offloaded
+    # established-потоки не проходят forward-цепочки ddos_protect.
+    print_warn "ВНИМАНИЕ: established-потоки в flowtable обходят forward-учёт shieldnode (ddos_protect)."
+    print_info "  SYN/новые соединения защищены как раньше; учёт по живым потокам — нет. Это осознанный trade-off opt-in."
     # Проверяем поддержку flowtable текущим ядром — пробная транзакция.
     # На kernel < 4.16 или nft < 1.0.1 получим ошибку парсинга → fallback.
     FLOW_SUPPORTED=0
@@ -4703,12 +4922,15 @@ NFT_FLOW_PROBE
         print_info "После ребута на XanMod 6.x запусти --optimize повторно — flowtable активируется"
         FLOWTABLE_STATUS="unsupported (kernel/nft too old)"
     else
-        # v5.7.0: HARDWARE flow offload — пробуем flags offload на реальном NIC.
+        # HARDWARE flow offload — OPT-IN (v6.0.0, аудит №10): контракт стека
+        # заявлял opt-in, фактически был opt-out. Включается только
+        # ENABLE_HW_FLOW_OFFLOAD=1. DISABLE_HW_FLOW_OFFLOAD=1 — legacy-алиас
+        # "выключено" (совпадает с новым дефолтом).
         # Поддержка: kernel >= 5.16 + NIC с flow offload в драйвере (mlx5_cx5,
         # bnxt, i40e, частично ice). На virtio/e1000/обычных VPS — probe
         # молча провалится, остаёмся на software offload.
         HW_OFFLOAD=0
-        if [ "${DISABLE_HW_FLOW_OFFLOAD:-0}" != "1" ]; then
+        if [ "${ENABLE_HW_FLOW_OFFLOAD:-0}" = "1" ] && [ "${DISABLE_HW_FLOW_OFFLOAD:-0}" != "1" ]; then
             # mlx5 и др. требуют явный hw-tc-offload на интерфейсе.
             if command -v ethtool >/dev/null 2>&1; then
                 ethtool -K "$IFACE" hw-tc-offload on 2>/dev/null || true
@@ -4741,11 +4963,13 @@ NFT_HW_PROBE
         mkdir -p /etc/nftables.d
         cat > /etc/nftables.d/vpn-node-flowtable.conf <<NFT_FLOW_EOF
 #!/usr/sbin/nft -f
-# Generated by vpn-node-setup v5.7.0 — flow offloading (software + hw-probe).
+# Generated by vpn-node-setup v6.0.0 — flow offloading (OPT-IN, software + hw-probe).
+# Включено оператором: ENABLE_FLOWTABLE=1 (+ ENABLE_HW_FLOW_OFFLOAD=1 для hw).
 # Ускоряет форвардинг established-потоков: пакеты разрешённых соединений
 # идут ingress → egress напрямую, минуя filter/forward цепочки.
+# ВНИМАНИЕ: offloaded-потоки обходят forward-учёт shieldnode (ddos_protect).
 # Новые соединения ВСЕГДА проходят полный путь (shieldnode/MSS clamp работают).
-# Строка "flags offload" появляется только если NIC прошёл hw-probe (v5.7.0).
+# Строка "flags offload" появляется только если NIC прошёл hw-probe.
 #
 # Отключить: sudo systemctl stop vpn-flowtable && sudo nft delete table inet vpn_node_flowtable
 # Статус:    sudo nft list flowtables inet vpn_node_flowtable
@@ -4795,6 +5019,12 @@ ExecReload=/usr/sbin/nft -f /etc/nftables.d/vpn-node-flowtable.conf
 [Install]
 WantedBy=multi-user.target
 FLOW_UNIT_EOF
+            # v6.0.0 (аудит №10): hw-tc-offload раньше включался только live —
+            # после ребута слетал, а конфиг нёс "flags offload". Персистим в
+            # том же юните; iface резолвим в рантайме (переименование NIC).
+            if [ "$HW_OFFLOAD" = "1" ]; then
+                sed -i '/^ExecStart=\/usr\/sbin\/nft/i ExecStartPre=-/bin/sh -c "IF=$(ip -o -4 route show to default | awk '"'"'{print $5; exit}'"'"'); [ -n \\"$IF\\" ] && /usr/sbin/ethtool -K \\"$IF\\" hw-tc-offload on || true"' /etc/systemd/system/vpn-flowtable.service
+            fi
             systemctl daemon-reload 2>/dev/null || true
             if systemctl enable vpn-flowtable.service >/dev/null 2>&1; then
                 print_ok "Systemd unit vpn-flowtable.service enabled (persistent после reboot)"
@@ -4881,6 +5111,12 @@ THP_EOF
     fi
 else
     print_info "THP tuning пропущен (DISABLE_THP_TUNE=1)"
+    # v6.0.0 (аудит №6): сносим persistence прошлых прогонов — флаг должен
+    # выключать шаг ЦЕЛИКОМ, а не только live-часть.
+    if [ -f /etc/tmpfiles.d/thp-madvise.conf ]; then
+        rm -f /etc/tmpfiles.d/thp-madvise.conf
+        print_ok "Удалён /etc/tmpfiles.d/thp-madvise.conf (boot-persistence THP снят; live-значение — до reboot)"
+    fi
 fi
 
 # --- 7.10B: I/O scheduler=none ----------------------------------------------
@@ -4951,6 +5187,11 @@ UDEV_EOF
     fi
 else
     print_info "I/O scheduler tuning пропущен (DISABLE_IO_SCHED_TUNE=1)"
+    # v6.0.0 (аудит №6): сносим persistence прошлых прогонов.
+    if [ -f /etc/udev/rules.d/60-vpn-io-scheduler.rules ]; then
+        rm -f /etc/udev/rules.d/60-vpn-io-scheduler.rules
+        print_ok "Удалён /etc/udev/rules.d/60-vpn-io-scheduler.rules (live-scheduler — до reboot)"
+    fi
 fi
 
 # --- 7.10C: Docker daemon.json (log rotation + live-restore) ----------------
@@ -5084,6 +5325,21 @@ ADDRANDOM_STATUS="skipped"; DIRTY_STATUS="skipped"
 
 if [ "${DISABLE_SSD_TUNE:-0}" = "1" ]; then
     print_info "ШАГ 7.11 пропущен (DISABLE_SSD_TUNE=1)"
+    # v6.0.0 (аудит №6): мастер-свитч сносит persistence всего семейства
+    # (fstab-правки НЕ откатываем — есть backup fstab.bak-*; live-значения
+    # живут до reboot).
+    _SSD_REMOVED=""
+    for _f in /etc/sysctl.d/96-ssd-io-tuning.conf /etc/udev/rules.d/61-vpn-add-random.rules; do
+        [ -f "$_f" ] && rm -f "$_f" && _SSD_REMOVED="$_SSD_REMOVED $_f"
+    done
+    if [ -f /etc/systemd/system/vpn-noatime-remount.service ]; then
+        systemctl disable --now vpn-noatime-remount.service 2>/dev/null || true
+        rm -f /etc/systemd/system/vpn-noatime-remount.service
+        systemctl daemon-reload 2>/dev/null || true
+        _SSD_REMOVED="$_SSD_REMOVED vpn-noatime-remount.service"
+    fi
+    [ -n "$_SSD_REMOVED" ] && print_ok "Удалены артефакты 7.11 прошлых прогонов:$_SSD_REMOVED"
+    print_info "fstab-правки (noatime/discard) не откатываются автоматически — restore из /etc/fstab.bak-*"
 else
 
 # --- 7.11A+B: fstab — noatime + удаление discard (одна транзакция) ----------
@@ -5099,7 +5355,10 @@ _DO_NOATIME=0; _DO_DISCARD=0
 if [ -f "$FSTAB" ] && [ $((_DO_NOATIME + _DO_DISCARD)) -gt 0 ]; then
     _FSTAB_BAK="$FSTAB.bak-$(date +%Y%m%d-%H%M%S)"
     cp -a "$FSTAB" "$_FSTAB_BAK" 2>/dev/null || true
-    _FSTAB_TMP=$(mktemp) || _FSTAB_TMP=""
+    # v6.0.0 (аудит №1): tmp-файл создаём в /etc (та же ФС, что и fstab) —
+    # это даёт атомарный rename вместо truncate+write. mktemp в /tmp ломал
+    # атомарность: /tmp на многих системах отдельная/tmpfs.
+    _FSTAB_TMP=$(mktemp /etc/.fstab.vpn-node.XXXXXX) || _FSTAB_TMP=""
     _FSTAB_CNT=$(mktemp) || _FSTAB_CNT=""
     if [ -n "$_FSTAB_TMP" ] && [ -n "$_FSTAB_CNT" ]; then
         awk -v do_noatime="$_DO_NOATIME" -v do_discard="$_DO_DISCARD" \
@@ -5146,8 +5405,14 @@ END { print changed+0 > changed_file }
                 print_warn "Новый fstab не прошёл валидацию — оставляем старый (backup: $_FSTAB_BAK)"
             fi
             if [ "$_FSTAB_OK" = "1" ]; then
-                cat "$_FSTAB_TMP" > "$FSTAB"
-                print_ok "fstab: изменено ${_FSTAB_CHANGES} записей (noatime +/− discard; backup: $_FSTAB_BAK)"
+                # v6.0.0 (аудит №1): атомарная замена — rename() в пределах /etc.
+                # cat > при сбое посередине оставлял усечённый fstab → emergency mode.
+                chmod 0644 "$_FSTAB_TMP" 2>/dev/null
+                if mv "$_FSTAB_TMP" "$FSTAB" 2>/dev/null; then
+                    print_ok "fstab: изменено ${_FSTAB_CHANGES} записей (noatime +/− discard; атомарно; backup: $_FSTAB_BAK)"
+                else
+                    print_warn "fstab: mv не удался — старый fstab на месте (backup: $_FSTAB_BAK)"
+                fi
             fi
         fi
         rm -f "$_FSTAB_TMP" "$_FSTAB_CNT"
@@ -5185,6 +5450,15 @@ if [ "$_DO_NOATIME" = "1" ] && command -v findmnt >/dev/null 2>&1; then
     fi
 else
     [ "$_DO_NOATIME" = "0" ] && print_info "noatime пропущен (SKIP_NOATIME=1)"
+fi
+
+# v6.0.0 (аудит №6): SKIP_NOATIME=1 сносит fallback-юнит прошлых прогонов.
+# Правки fstab НЕ откатываем (restore из /etc/fstab.bak-* при необходимости).
+if [ "$_DO_NOATIME" = "0" ] && [ -f /etc/systemd/system/vpn-noatime-remount.service ]; then
+    systemctl disable --now vpn-noatime-remount.service 2>/dev/null || true
+    rm -f /etc/systemd/system/vpn-noatime-remount.service
+    systemctl daemon-reload 2>/dev/null || true
+    print_ok "Удалён vpn-noatime-remount.service (SKIP_NOATIME=1)"
 fi
 
 # v5.12.1: persistence-fallback для систем, где / НЕ описан в fstab
@@ -5279,6 +5553,11 @@ AR_EOF
     fi
 else
     print_info "add_random tuning пропущен (DISABLE_ADD_RANDOM=1)"
+    # v6.0.0 (аудит №6): сносим persistence прошлых прогонов.
+    if [ -f /etc/udev/rules.d/61-vpn-add-random.rules ]; then
+        rm -f /etc/udev/rules.d/61-vpn-add-random.rules
+        print_ok "Удалён /etc/udev/rules.d/61-vpn-add-random.rules (live add_random — до reboot)"
+    fi
 fi
 
 # --- 7.11D: vm.dirty ratios — плавный writeback вместо всплесков -------------
@@ -5313,6 +5592,11 @@ DIRTY_EOF
     print_ok "dirty writeback limits: $DIRTY_STATUS (+ /etc/sysctl.d/96-ssd-io-tuning.conf)"
 else
     print_info "dirty tuning пропущен (DISABLE_DIRTY_TUNE=1)"
+    # v6.0.0 (аудит №6): сносим persistence прошлых прогонов.
+    if [ -f /etc/sysctl.d/96-ssd-io-tuning.conf ]; then
+        rm -f /etc/sysctl.d/96-ssd-io-tuning.conf
+        print_ok "Удалён /etc/sysctl.d/96-ssd-io-tuning.conf (live dirty-лимиты — до reboot)"
+    fi
 fi
 
 fi # DISABLE_SSD_TUNE
@@ -5325,57 +5609,114 @@ print_header "ШАГ 7.12: DATAPATH PACK 2.0 (budget / tw_buckets / fq / vGPU)"
 
 if [ "${DISABLE_DATAPATH2:-0}" = "1" ]; then
     print_info "ШАГ 7.12 пропущен (DISABLE_DATAPATH2=1)"
+    # v6.0.0 (аудит №6): сносим артефакты прошлых прогонов целиком.
+    _DP_REMOVED=""
+    for _f in /etc/sysctl.d/81-vpn-datapath2.conf /etc/sysctl.d/96-vpn-datapath2.conf /usr/local/sbin/vpn-fq-tune.sh; do
+        [ -f "$_f" ] && rm -f "$_f" && _DP_REMOVED="$_DP_REMOVED $_f"
+    done
+    if [ -f /etc/systemd/system/vpn-fq-tune.service ]; then
+        systemctl disable --now vpn-fq-tune.service 2>/dev/null || true
+        rm -f /etc/systemd/system/vpn-fq-tune.service
+        systemctl daemon-reload 2>/dev/null || true
+        _DP_REMOVED="$_DP_REMOVED vpn-fq-tune.service"
+    fi
+    [ -n "$_DP_REMOVED" ] && print_ok "Удалены артефакты datapath2:$_DP_REMOVED (live-значения — до reboot)"
+    # blacklist-vgpu: 7.12C внутри этого else → при DISABLE_DATAPATH2=1 его
+    # свитч не исполняется, поэтому мастер-свитч обязан сносить файл сам.
+    if [ -f /etc/modprobe.d/blacklist-vgpu.conf ]; then
+        rm -f /etc/modprobe.d/blacklist-vgpu.conf
+        print_ok "Удалён /etc/modprobe.d/blacklist-vgpu.conf"
+    fi
 else
 
 # --- 7.12A: sysctl datapath-ядро ---
 print_status "Применяем datapath sysctl (netdev_budget / tw_buckets / tcp_mem)..."
 DP_MEM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 1048576)
-DP_MEMP=$((DP_MEM_KB / 16))          # ≈ RAM_pages/4 — потолок tcp_mem
-[ "$DP_MEMP" -lt 65536 ] && DP_MEMP=65536
-cat > /etc/sysctl.d/96-vpn-datapath2.conf <<DP2_EOF
-# node-perf datapath pack 2.0 (v5.13.0)
+DP_PAGES=$((DP_MEM_KB / 4))
+DP_MEMP=$((DP_PAGES / 4))               # потолок tcp_mem ≈ 25% RAM
+# v6.0.0 (аудит №18): старый фиксированный floor 65536 (256MB) на 512MB-ноде
+# раздувал потолок до ~50% RAM → swap-шторм в zram раньше pressure. Теперь
+# floor = RAM_pages/8, ограничен снизу 16384 (64MB), сверху 65536 (256MB).
+DP_FLOOR=$((DP_PAGES / 8))
+[ "$DP_FLOOR" -gt 65536 ] && DP_FLOOR=65536
+[ "$DP_FLOOR" -lt 16384 ] && DP_FLOOR=16384
+[ "$DP_MEMP" -lt "$DP_FLOOR" ] && DP_MEMP=$DP_FLOOR
+# v6.0.0 (аудит №13): файл переехал 96- → 81-. Лексикографически 96 > 90 —
+# наши datapath-значения молча перебивали бы security-overrides shieldnode,
+# если тот когда-либо запишет shared keys (tw_buckets, netdev_budget).
+# Прецедентный класс «имя файла победило смысл». Старый 96- удаляем.
+rm -f /etc/sysctl.d/96-vpn-datapath2.conf
+cat > /etc/sysctl.d/81-vpn-datapath2.conf <<DP2_EOF
+# node-perf datapath pack 2.0 (v6.0.0; бывш. 96-vpn-datapath2.conf)
 net.core.netdev_budget = 600          # B2: NAPI выгребает до 600 пакетов/цикл (деф 300)
 net.core.netdev_budget_usecs = 8000   # B2: до 8ms на poll-цикл (деф 2ms)
 net.ipv4.tcp_max_tw_buckets = 524288  # TIME_WAIT-потолок (деф 16-32k — мало для 20k сессий)
 net.ipv4.tcp_mem = $((DP_MEMP*3/4)) $((DP_MEMP*7/8)) $DP_MEMP   # pressure-пороги по RAM
 DP2_EOF
-sysctl -p /etc/sysctl.d/96-vpn-datapath2.conf >/dev/null 2>&1     && print_ok "datapath sysctl: budget=600/8000us, tw_buckets=524288, tcp_mem=${DP_MEMP}pg"     || print_warn "datapath sysctl: часть ключей не применилась live (вступит после reboot)"
+sysctl -p /etc/sysctl.d/81-vpn-datapath2.conf >/dev/null 2>&1     && print_ok "datapath sysctl (81-vpn-datapath2.conf): budget=600/8000us, tw_buckets=524288, tcp_mem=${DP_MEMP}pg"     || print_warn "datapath sysctl: часть ключей не применилась live (вступит после reboot)"
 
-# --- 7.12B: fq параметры (только single-queue root=fq) ---
-if command -v tc >/dev/null 2>&1 && [ -n "${IFACE:-}" ]; then
-    DP_QN=$(ls -d /sys/class/net/"$IFACE"/queues/tx-* 2>/dev/null | wc -l)
-    DP_ROOT=$(tc qdisc show dev "$IFACE" 2>/dev/null | awk '/qdisc/ && /root/ {print $2; exit}')
-    if [ "${DP_QN:-1}" -le 1 ] && [ "$DP_ROOT" = "fq" ]; then
-        if tc qdisc replace dev "$IFACE" root fq limit 100000 flow_limit 1000 buckets 16384 2>/dev/null; then
-            print_ok "fq tuned: limit=100000 flow_limit=1000 buckets=16384"
-            DP_TC_BIN=$(command -v tc)
-            cat > /etc/systemd/system/vpn-fq-tune.service <<FQEOF
+# --- 7.12B: fq параметры (root fq И дочерние fq под mq) ---
+# v6.0.0 (аудит №15): раньше работало только при single-queue + root=fq —
+# на типовом multi-queue virtio шаг был no-op, дочерние fq оставались с
+# дефолтами (limit 10000, buckets 1024). Теперь: генератор vpn-fq-tune.sh,
+# который в рантайме резолвит default-iface (переименование NIC не ломает)
+# и тюнит как root fq, так и каждый fq-ребёнок под mq (handle/parent сохр.).
+# buckets 16384→32768: при 20k+ потоков load factor <= 1.
+if command -v tc >/dev/null 2>&1; then
+    cat > /usr/local/sbin/vpn-fq-tune.sh <<'FQSCRIPT_EOF'
+#!/bin/bash
+# vpn-fq-tune.sh (v6.0.0): fq pacing limits для datapath — root fq и mq-children.
+# iface резолвим в рантайме: смена имени NIC (миграция VM) не ломает юнит.
+TC=$(command -v tc 2>/dev/null) || exit 0
+IFACE=$(ip -o -4 route show to default 2>/dev/null | awk '{print $5; exit}')
+[ -z "$IFACE" ] && exit 0
+FQ_ARGS="limit 100000 flow_limit 1000 buckets 32768"
+ROOT=$("$TC" qdisc show dev "$IFACE" 2>/dev/null | awk '/qdisc/ && /root/ {print $2; exit}')
+case "$ROOT" in
+    fq)
+        "$TC" qdisc replace dev "$IFACE" root fq $FQ_ARGS 2>/dev/null || true
+        ;;
+    mq)
+        # Каждый fq-ребёнок под mq: replace с сохранением handle/parent.
+        "$TC" qdisc show dev "$IFACE" 2>/dev/null | \
+        awk '$1=="qdisc" && $2=="fq" {print $3, $5}' | \
+        while read -r _handle _parent; do
+            [ -n "$_handle" ] && [ -n "$_parent" ] || continue
+            "$TC" qdisc replace dev "$IFACE" handle "$_handle" parent "$_parent" fq $FQ_ARGS 2>/dev/null || true
+        done
+        ;;
+    *)
+        # custom (cake/htb/...) или отсутствует — не трогаем
+        :
+        ;;
+esac
+exit 0
+FQSCRIPT_EOF
+    chmod +x /usr/local/sbin/vpn-fq-tune.sh
+    # Live apply прямо сейчас
+    if /usr/local/sbin/vpn-fq-tune.sh; then
+        print_ok "fq tuned (live): limit=100000 flow_limit=1000 buckets=32768 (root fq + mq-children)"
+    else
+        print_warn "vpn-fq-tune.sh вернул ошибку — параметры не применены"
+    fi
+    cat > /etc/systemd/system/vpn-fq-tune.service <<'FQEOF'
 [Unit]
-Description=VPN fq datapath tuning ($IFACE)
+Description=VPN fq datapath tuning (v6.0.0, runtime iface)
 After=network-pre.target
 Wants=network-pre.target
 
 [Service]
 Type=oneshot
-# guard: если появился mq (multi-queue) — НЕ перетираем его одиночным fq
-ExecStart=/bin/sh -c "$DP_TC_BIN qdisc show dev $IFACE | grep -q 'qdisc mq' || $DP_TC_BIN qdisc replace dev $IFACE root fq limit 100000 flow_limit 1000 buckets 16384"
+ExecStart=/usr/local/sbin/vpn-fq-tune.sh
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 FQEOF
-            systemctl daemon-reload 2>/dev/null || true
-            systemctl enable vpn-fq-tune.service >/dev/null 2>&1                 && print_ok "vpn-fq-tune.service: persistence включён"                 || print_warn "vpn-fq-tune.service: enable не удался — fq параметры слетят после reboot"
-        else
-            print_warn "fq replace не удался — параметры не применены"
-        fi
-    elif [ "$DP_ROOT" = "mq" ]; then
-        print_info "fq tune: multi-queue (mq+fq per-queue) — глобальные параметры не трогаем"
-    else
-        print_info "fq tune: root qdisc = ${DP_ROOT:-unknown} (не fq) — пропуск"
-    fi
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable vpn-fq-tune.service >/dev/null 2>&1                 && print_ok "vpn-fq-tune.service: persistence включён"                 || print_warn "vpn-fq-tune.service: enable не удался — fq параметры слетят после reboot"
 else
-    print_info "fq tune: tc или IFACE недоступны — пропуск"
+    print_info "fq tune: tc недоступен — пропуск"
 fi
 
 # --- 7.12C: vGPU blacklist (БЕЗ live-unload — урок D-state/TTM) ---
@@ -5394,6 +5735,13 @@ if [ "${SKIP_VGPU_BLACKLIST:-0}" != "1" ]; then
         print_info "vGPU blacklist уже на месте"
     else
         print_info "vGPU модули (qxl/bochs_drm/cirrus) не загружены — ок"
+    fi
+else
+    print_info "vGPU blacklist пропущен (SKIP_VGPU_BLACKLIST=1)"
+    # v6.0.0 (аудит №6): сносим persistence прошлых прогонов.
+    if [ -f /etc/modprobe.d/blacklist-vgpu.conf ]; then
+        rm -f /etc/modprobe.d/blacklist-vgpu.conf
+        print_ok "Удалён /etc/modprobe.d/blacklist-vgpu.conf (загруженные модули — до reboot)"
     fi
 fi
 
@@ -5462,6 +5810,12 @@ print_ok "Systemd перезагружен"
 #   kernel         — ядро (xanmod-lts / mainline / custom)
 #   bbr            — версия BBR (v1/v3/unknown)
 #   profile        — RAM-профиль (SURVIVAL/BALANCED/PERFORMANCE/ULTRA)
+#
+# v6.0.0 (schema=2): добавлены машиночитаемые поля для валидации shieldnode —
+#   contract_schema              — версия схемы контракта (2)
+#   conntrack_max                — tier-aware лимит conntrack
+#   conntrack_established_timeout — TCP established timeout (14400 = 4ч)
+#   hw_flow_offload              — 1 если flowtable с flags offload (HW)
 
 print_header "ШАГ 8.5: STACK CONTRACT"
 
@@ -5522,6 +5876,10 @@ noatime=${NOATIME_STATUS:-skipped}
 fstrim=${FSTRIM_STATUS:-skipped}
 add_random=${ADDRANDOM_STATUS:-skipped}
 dirty_writeback=${DIRTY_STATUS:-skipped}
+contract_schema=2
+conntrack_max=${CONNTRACK_MAX:-unknown}
+conntrack_established_timeout=14400
+hw_flow_offload=${HW_OFFLOAD:-0}
 STACK_EOF
     chmod 0644 "$STACK_TMP"
     mv "$STACK_TMP" "$STACK_CONF"
@@ -5590,7 +5948,7 @@ echo -e "  ${BOLD}Что было сделано:${NC}"
 echo -e "  ├─ ${GREEN}✔${NC} Бэкап старых конфигов: ${CYAN}${BACKUP_DIR}${NC}"
 echo -e "  ├─ ${GREEN}✔${NC} Удалены apport, whoopsie, ubuntu-report, popularity-contest"
 echo -e "  ├─ ${GREEN}✔${NC} cloud-init и snapd НЕ тронуты (защита SSH-ключей)"
-echo -e "  ├─ ${GREEN}✔${NC} Отключены ModemManager, fwupd, udisks2, multipathd, unattended-upgrades"
+echo -e "  ├─ ${GREEN}✔${NC} Отключены ModemManager, udisks2 (multipathd/unattended — по условиям)"
 echo -e "  ├─ ${GREEN}✔${NC} Ограничены логи journald (100MB)"
 case "$KERNEL_BRANCH" in
     "LTS-fresh-install")
@@ -5617,13 +5975,13 @@ case "$KERNEL_BRANCH" in
 esac
 echo -e "  ├─ ${GREEN}✔${NC} IPv6 отключён через sysctl (модуль остался, трафик не работает)"
 echo -e "  ├─ ${GREEN}✔${NC} Настроен conntrack ($CONNTRACK_MAX max, короткие таймауты, $CONNTRACK_TIER)"
-echo -e "  ├─ ${GREEN}✔${NC} Оптимизирован сетевой стек (tw_reuse, MTU probing, notsent_lowat)"
+echo -e "  ├─ ${GREEN}✔${NC} Оптимизирован сетевой стек (tw_reuse, MTU probing, tier-aware буферы)"
 echo -e "  ├─ ${MAGENTA}ℹ${NC} Security hardening (rp_filter, syncookies, redirects) — owned by shieldnode"
 echo -e "  ├─ ${GREEN}✔${NC} Настроены лимиты (nofile $LIMIT_COUNT)"
 echo -e "  ├─ ${GREEN}✔${NC} Qdisc + RPS настроены под топологию железа"
-echo -e "  ├─ ${GREEN}✔${NC} NIC бусты: GRO flush, XPS, offloads, ring buffers"
+echo -e "  ├─ ${GREEN}✔${NC} NIC бусты: XPS, offloads, ring buffers (GRO flush — opt-in)"
 echo -e "  ├─ ${GREEN}✔${NC} IRQ affinity распределён по CPU (round-robin)"
-echo -e "  └─ ${GREEN}✔${NC} Inotify limits увеличены (для 10k+ соединений)"
+echo -e "  └─ ${GREEN}✔${NC} Inotify limits увеличены (file watches: контейнеры/логи, не сокеты)"
 echo ""
 echo -e "  ${BOLD}Что НЕ было тронуто (минимизация рисков v4.10):${NC}"
 echo -e "  ├─ ${MAGENTA}✗${NC} netplan (никаких accept-ra, link-local, новых файлов)"

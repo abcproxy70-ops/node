@@ -20,11 +20,17 @@
 #  FIX  apt-get install ядра: Acquire::Timeout=30/Retries=2 + timeout 900 —
 #       на РФ-нодах DPI-сталл deb.xanmod.org больше не вешает прогон навсегда;
 #       при таймауте — явный маркер "догонится повторным прогоном".
+#       Stall-защита расширена на ВСЕ сетевые apt-вызовы (APT_NET_OPTS глобально):
+#       update в ШАГ 4, update с репо XanMod (+timeout 300), install nftables/
+#       logrotate/ethtool/зависимостей.
 #  FIX  GRUB: скан не-LTS ядер теперь по ВСЕМ /boot/vmlinuz-*, не только
 #       *xanmod* — на Ubuntu 26.04 stock-ядро 7.0 новее XanMod LTS 6.18 и
 #       молча перехватывало GRUB_DEFAULT=0 (потеря XanMod/BBRv3 после ребута).
 #  FIX  sysctl --system (перечитывал и 90-shieldnode.conf, откатывая его
 #       live-значения) заменён на sysctl -p только своих файлов.
+#  FIX  snapshot/rollback покрывают vpn-fq-tune (unit + скрипт); при откате
+#       до v5.x v6-артефакты без пары в snapshot'е снимаются (81-datapath2,
+#       vpn-fq-tune) — не остаются живыми и неуправляемыми.
 #  FIX  SETUP_DISABLE_UNATTENDED=0 теперь ЧЕСТНО возвращает авто-апдейты:
 #       удаляет 99-vpn-node-no-unattended и enable --now таймеры (раньше —
 #       только start на сессию, после ребута апдейты снова мёртвы).
@@ -760,10 +766,10 @@ for arg in "$@"; do
             mkdir -p "$SNAP_DIR"
             [ -d /etc/sysctl.d ] && cp -a /etc/sysctl.d "$SNAP_DIR/sysctl.d" 2>/dev/null
             [ -d /etc/security/limits.d ] && cp -a /etc/security/limits.d "$SNAP_DIR/limits.d" 2>/dev/null
-            for unit in rps-tuning.service nic-tuning.service; do
+            for unit in rps-tuning.service nic-tuning.service vpn-fq-tune.service; do
                 [ -f "/etc/systemd/system/$unit" ] && cp -a "/etc/systemd/system/$unit" "$SNAP_DIR/" 2>/dev/null
             done
-            for s in /usr/local/sbin/rps-tuning.sh /usr/local/sbin/nic-tuning.sh; do
+            for s in /usr/local/sbin/rps-tuning.sh /usr/local/sbin/nic-tuning.sh /usr/local/sbin/vpn-fq-tune.sh; do
                 [ -f "$s" ] && cp -a "$s" "$SNAP_DIR/" 2>/dev/null
             done
             # Указатель на последний snapshot для rollback
@@ -853,11 +859,24 @@ for arg in "$@"; do
                     echo "Восстанавливаю snapshot: $SNAP"
                     [ -d "$SNAP/sysctl.d" ] && cp -a "$SNAP/sysctl.d/." /etc/sysctl.d/
                     [ -d "$SNAP/limits.d" ] && cp -a "$SNAP/limits.d/." /etc/security/limits.d/
-                    for unit in rps-tuning.service nic-tuning.service; do
+                    for unit in rps-tuning.service nic-tuning.service vpn-fq-tune.service; do
                         [ -f "$SNAP/$unit" ] && cp -a "$SNAP/$unit" "/etc/systemd/system/$unit"
                     done
                     [ -f "$SNAP/rps-tuning.sh" ] && cp -a "$SNAP/rps-tuning.sh" /usr/local/sbin/
                     [ -f "$SNAP/nic-tuning.sh" ] && cp -a "$SNAP/nic-tuning.sh" /usr/local/sbin/
+                    [ -f "$SNAP/vpn-fq-tune.sh" ] && cp -a "$SNAP/vpn-fq-tune.sh" /usr/local/sbin/
+                    # v6.0.0: артефакты, которых НЕТ в snapshot'е (их создала более
+                    # новая версия), снимаем — иначе откат до v5.x оставил бы
+                    # v6-юниты/sysctl-файлы живыми и неуправляемыми.
+                    if [ -f /etc/sysctl.d/81-vpn-datapath2.conf ] && [ ! -f "$SNAP/sysctl.d/81-vpn-datapath2.conf" ]; then
+                        rm -f /etc/sysctl.d/81-vpn-datapath2.conf
+                        echo "  ✓ Снят 81-vpn-datapath2.conf (артефакт v6, в snapshot'е отсутствует)"
+                    fi
+                    if [ -f /etc/systemd/system/vpn-fq-tune.service ] && [ ! -f "$SNAP/vpn-fq-tune.service" ]; then
+                        systemctl disable --now vpn-fq-tune.service 2>/dev/null || true
+                        rm -f /etc/systemd/system/vpn-fq-tune.service /usr/local/sbin/vpn-fq-tune.sh
+                        echo "  ✓ Снят vpn-fq-tune (артефакт v6, в snapshot'е отсутствует)"
+                    fi
                     # v6.0.0 (аудит №4): не sysctl --system (он перечитывает и
                     # 90-shieldnode.conf, откатывая его live-значения) — только
                     # свои файлы из snapshot'а.
@@ -1015,6 +1034,14 @@ print_ok()     { echo -e "${GREEN}✔${NC} $1"; }
 print_error()  { echo -e "${RED}✖${NC} $1"; }
 print_info()   { echo -e "${MAGENTA}ℹ${NC} $1"; }
 print_warn()   { echo -e "${YELLOW}⚠${NC} $1"; }
+
+# v6.0.0 (аудит №2, расширение): stall-защита apt на ВСЕХ сетевых вызовах,
+# не только установке ядра. РФ-нода + DPI-сталл deb.xanmod.org вешал ЛЮБОЙ
+# apt-get update/install бесконечно. Acquire::Timeout=30/Retries=2 ограничивают
+# каждый источник сверху; Queue-Mode=host — меньше параллельных коннектов
+# (меньше шансов на RST/stall от DPI). Ядерный install дополнительно под
+# timeout 900 (см. ШАГ 4), xanmod-update — под timeout 300.
+APT_NET_OPTS=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=2 -o Acquire::Queue-Mode=host)
 
 # ==============================================================================
 # v5.0: TUI MENU + MODE DISPATCH
@@ -1689,7 +1716,7 @@ fi
 print_status "Проверяем наличие nftables (для MSS clamp в ШАГ 7.8)..."
 if ! command -v nft >/dev/null 2>&1; then
     print_info "nft не найден, устанавливаю пакет nftables..."
-    if DEBIAN_FRONTEND=noninteractive apt-get install -y nftables 2>&1 | tail -5; then
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_NET_OPTS[@]}" nftables 2>&1 | tail -5; then
         if command -v nft >/dev/null 2>&1; then
             print_ok "nftables установлен ($(v5_nft_version 2>/dev/null || echo "версия?"))"
         else
@@ -2120,7 +2147,7 @@ print_ok "Journald ограничен: SystemMaxUse=100M"
 if [ "${SETUP_NO_REMNANODE_LOGROTATE:-0}" != "1" ]; then
     print_status "Настраиваю logrotate для логов remnanode..."
     if ! command -v logrotate >/dev/null 2>&1; then
-        apt-get install -y logrotate >/dev/null 2>&1 || true
+        apt-get install -y "${APT_NET_OPTS[@]}" logrotate >/dev/null 2>&1 || true
     fi
     if command -v logrotate >/dev/null 2>&1; then
         cat > /etc/logrotate.d/remnanode <<'LOGROTATE'
@@ -2395,15 +2422,17 @@ fi
 
 print_status "Обновляем списки пакетов..."
 echo ""
-if ! apt-get update; then
+# v6.0.0: APT_NET_OPTS на update тоже — DPI-сталл источника больше не вешает прогон.
+if ! apt-get "${APT_NET_OPTS[@]}" update; then
     # Возможно мешает stale/битый xanmod repo — сносим и повторяем один раз.
     if [ -f "$XANMOD_LIST" ]; then
         print_warn "apt-get update упал — сношу возможно-битый xanmod repo и повторяю..."
         purge_xanmod_repo
     fi
-    if ! apt-get update; then
+    if ! apt-get "${APT_NET_OPTS[@]}" update; then
         print_error "FATAL: apt-get update завершился с ошибкой!"
         print_info "Проверьте интернет-соединение и состояние репозиториев (/etc/apt/sources.list)"
+        print_info "На РФ-нодах: возможен DPI-сталл — Acquire::Timeout=30 ограничивает каждый источник, повторный прогон обычно проходит."
         exit 1
     fi
 fi
@@ -2413,7 +2442,7 @@ print_ok "Списки обновлены"
 # Устанавливаем зависимости
 print_status "Устанавливаем необходимые пакеты..."
 echo ""
-apt-get install -y wget gnupg2 ca-certificates lsb-release bc
+apt-get install -y "${APT_NET_OPTS[@]}" wget gnupg2 ca-certificates lsb-release bc
 echo ""
 print_ok "Зависимости установлены"
 
@@ -2500,10 +2529,13 @@ print_ok "Репозиторий добавлен в sources.list"
 
 print_status "Обновляем списки пакетов (с XanMod)..."
 echo ""
-if ! apt-get update; then
-    print_error "FATAL: apt-get update с репозиторием XanMod провалился!"
+# v6.0.0: timeout 300 + APT_NET_OPTS — deb.xanmod.org под РФ-DPI мог сталлить
+# этот update навсегда. rc=124 от timeout попадает в ту же ветку FATAL с
+# самолечением (снос битого repo → rerun чистый).
+if ! timeout 300 apt-get "${APT_NET_OPTS[@]}" update; then
+    print_error "FATAL: apt-get update с репозиторием XanMod провалился (или сталл >300s — DPI?)!"
     print_info "Возможные причины:"
-    print_info "  - Репозиторий XanMod недоступен (deb.xanmod.org)"
+    print_info "  - Репозиторий XanMod недоступен/сталлит (deb.xanmod.org) — типично для РФ DPI"
     print_info "  - GPG ключ не подходит к репозиторию"
     print_info "  - Codename '$DISTRO_CODENAME' не поддерживается XanMod"
     # v5.0.4 (fix #28): cleanup broken state перед exit'ом.
@@ -2649,11 +2681,10 @@ else
     # v6.0.0 (аудит №2): stall-защита большого скачивания (~100-150MB .deb).
     # Боевой сценарий: РФ-нода, DPI сталлит deb.xanmod.org — apt висел
     # бесконечно, Ctrl+C ломал dpkg посреди транзакции. Теперь:
-    #   - Acquire::Timeout=30 на http/https + Retries=2 (как у apt-get update)
+    #   - APT_NET_OPTS (Acquire::Timeout=30/Retries=2) — глобально, см. начало скрипта
     #   - timeout 900 вокруг всего install (watchdog последней линии)
     #   - rc=124/прерывание → понятный маркер: частичное состояние лечится
     #     повторным прогоном (dpkg --audit в ШАГ 1.5 уже это чинит).
-    APT_NET_OPTS=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=2 -o Acquire::Queue-Mode=host)
     timeout 900 env DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_NET_OPTS[@]}" "$KERNEL_PKG"
     INSTALL_RESULT=$?
     if [ "$INSTALL_RESULT" -eq 124 ]; then
@@ -4136,7 +4167,7 @@ else
     # Проверяем наличие ethtool
     if ! command -v ethtool >/dev/null 2>&1; then
         print_status "Устанавливаем ethtool..."
-        DEBIAN_FRONTEND=noninteractive apt-get install -y ethtool >/dev/null 2>&1
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_NET_OPTS[@]}" ethtool >/dev/null 2>&1
     fi
 
     # === БУСТ 1: ethtool offloads (GRO/GSO/TSO/checksums) ===
